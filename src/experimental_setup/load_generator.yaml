@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rb-read
+  namespace: newslab
+  labels:
+    app: rb-read
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: rb-read
+  template:
+    metadata:
+      labels:
+        app: rb-read
+    spec:
+      containers:
+      - name: rb
+        image: redis:7.2-alpine
+        imagePullPolicy: IfNotPresent
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -eu
+
+            ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+            rand_between() {
+              min="$1"
+              max="$2"
+              if [ "$min" -gt "$max" ]; then
+                t="$min"; min="$max"; max="$t"
+              fi
+              echo $(( RANDOM % (max - min + 1) + min ))
+            }
+
+            clamp_min() {
+              val="$1"
+              min="$2"
+              if [ "$val" -lt "$min" ]; then
+                echo "$min"
+              else
+                echo "$val"
+              fi
+            }
+
+            log_phase() {
+              name="$1"
+              type="$2"
+              clients="$3"
+              reqs="$4"
+              secs="$5"
+              workers="$6"
+              echo "PHASE pod=${HOSTNAME} name=$name type=$type clients=$clients reqs=$reqs secs=$secs workers=$workers ts=$(ts)"
+            }
+
+            run_bench_get() {
+              clients="$1"
+              reqs="$2"
+              timeout 45s redis-benchmark -h redis-replicas -p 6379 -t get -n "$reqs" -c "$clients" -q >/dev/null 2>&1 || true
+            }
+
+            run_bench_set() {
+              clients="$1"
+              reqs="$2"
+              timeout 45s redis-benchmark -h redis-master -p 6379 -t set -n "$reqs" -c "$clients" -q >/dev/null 2>&1 || true
+            }
+
+            run_get_phase() {
+              name="$1"
+              base_secs="$2"
+              base_clients="$3"
+              base_reqs="$4"
+              base_workers="$5"
+
+              secs="$(rand_between $((base_secs-8)) $((base_secs+8)))"
+              clients="$(rand_between $((base_clients-25)) $((base_clients+25)))"
+              reqs="$(rand_between $((base_reqs-30000)) $((base_reqs+30000)))"
+              workers="$(rand_between "$base_workers" $((base_workers+1)))"
+
+              clients="$(clamp_min "$clients" 1)"
+              reqs="$(clamp_min "$reqs" 50000)"
+              workers="$(clamp_min "$workers" 1)"
+
+              log_phase "$name" "get" "$clients" "$reqs" "$secs" "$workers"
+
+              end=$(( $(date +%s) + secs ))
+              while [ "$(date +%s)" -lt "$end" ]; do
+                i=1
+                while [ "$i" -le "$workers" ]; do
+                  run_bench_get "$clients" "$reqs" &
+                  i=$((i+1))
+                done
+                wait
+              done
+            }
+
+            run_set_phase() {
+              name="$1"
+              base_secs="$2"
+              base_clients="$3"
+              base_reqs="$4"
+              base_workers="$5"
+
+              secs="$(rand_between $((base_secs-8)) $((base_secs+8)))"
+              clients="$(rand_between $((base_clients-25)) $((base_clients+25)))"
+              reqs="$(rand_between $((base_reqs-30000)) $((base_reqs+30000)))"
+              workers="$(rand_between "$base_workers" $((base_workers+1)))"
+
+              clients="$(clamp_min "$clients" 1)"
+              reqs="$(clamp_min "$reqs" 50000)"
+              workers="$(clamp_min "$workers" 1)"
+
+              log_phase "$name" "set" "$clients" "$reqs" "$secs" "$workers"
+
+              end=$(( $(date +%s) + secs ))
+              while [ "$(date +%s)" -lt "$end" ]; do
+                i=1
+                while [ "$i" -le "$workers" ]; do
+                  run_bench_set "$clients" "$reqs" &
+                  i=$((i+1))
+                done
+                wait
+              done
+            }
+
+            run_mixed_phase() {
+              name="$1"
+              base_secs="$2"
+              base_clients="$3"
+              base_reqs="$4"
+              base_workers="$5"
+
+              secs="$(rand_between $((base_secs-8)) $((base_secs+8)))"
+              clients="$(rand_between $((base_clients-25)) $((base_clients+25)))"
+              reqs="$(rand_between $((base_reqs-30000)) $((base_reqs+30000)))"
+              workers="$(rand_between "$base_workers" $((base_workers+1)))"
+
+              clients="$(clamp_min "$clients" 1)"
+              reqs="$(clamp_min "$reqs" 50000)"
+              workers="$(clamp_min "$workers" 1)"
+
+              log_phase "$name" "mixed" "$clients" "$reqs" "$secs" "$workers"
+
+              end=$(( $(date +%s) + secs ))
+              while [ "$(date +%s)" -lt "$end" ]; do
+                i=1
+                while [ "$i" -le "$workers" ]; do
+                  run_bench_get "$clients" "$reqs" &
+                  run_bench_set "$clients" "$reqs" &
+                  i=$((i+1))
+                done
+                wait
+              done
+            }
+
+            run_settle_phase() {
+              secs="$1"
+              echo "PHASE pod=${HOSTNAME} name=SETTLE type=idle clients=0 reqs=0 secs=$secs workers=0 ts=$(ts)"
+              sleep "$secs"
+            }
+
+            echo "START pod=${HOSTNAME} ts=$(ts)"
+
+            INITIAL_SLEEP="$(rand_between 0 60)"
+            echo "STAGGER pod=${HOSTNAME} sleep_secs=${INITIAL_SLEEP} ts=$(ts)"
+            sleep "$INITIAL_SLEEP"
+
+            echo "WARMUP pod=${HOSTNAME} ts=$(ts)"
+            timeout 60s redis-benchmark -h redis-master -p 6379 -t set -n 300000 -c 120 -q >/dev/null 2>&1 || true
+
+            cycle=0
+            while true; do
+              cycle=$((cycle+1))
+              echo "CYCLE pod=${HOSTNAME} num=$cycle ts=$(ts)"
+
+              run_get_phase  LOW_STEADY      60  90   120000 1
+              run_get_phase  LOW_PLUS        70  140  180000 1
+              run_settle_phase 8
+
+              run_get_phase  RAMP_1          85  260  220000 3
+              run_get_phase  RAMP_2         100  380  280000 4
+              run_get_phase  RAMP_3         120  520  320000 5
+              run_settle_phase 10
+
+              run_get_phase  HIGH_STEADY_1  160  720  320000 6
+              run_get_phase  HIGH_STEADY_2  200  920  360000 6
+              run_settle_phase 10
+
+              run_mixed_phase MIXED_HEAVY_1 140  500  260000 4
+              run_mixed_phase MIXED_HEAVY_2 160  650  320000 5
+              run_settle_phase 10
+
+              run_set_phase  WRITE_BURST_1  110  400  240000 4
+              run_set_phase  WRITE_BURST_2  140  550  300000 5
+              run_settle_phase 10
+
+              run_get_phase  COOLDOWN_1     110  220  180000 1
+              run_get_phase  COOLDOWN_2      95  150  130000 1
+              run_get_phase  DROP_LOW        80  90   90000  1
+              run_settle_phase 20
+            done
+        resources:
+          requests:
+            cpu: "750m"
+            memory: "256Mi"
+          limits:
+            cpu: "3"
+            memory: "1Gi"
+      restartPolicy: Always

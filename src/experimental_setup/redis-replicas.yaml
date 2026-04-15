@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-replicas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: replica
+    spec:
+      containers:
+      - name: redis
+        image: redis:7.2-alpine
+        ports:
+        - containerPort: 6379
+        command: ["redis-server","/etc/redis/redis-replica.conf"]
+
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1"
+            memory: "512Mi"
+
+        volumeMounts:
+        - name: config
+          mountPath: /etc/redis
+      volumes:
+      - name: config
+        configMap:
+          name: redis-config
+          items:
+          - key: redis-replica.conf
+            path: redis-replica.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-replicas
+spec:
+  selector:
+    app: redis
+    role: replica
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
